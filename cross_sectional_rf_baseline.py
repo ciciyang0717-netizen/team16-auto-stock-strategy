@@ -1,18 +1,23 @@
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
-df = pd.read_csv('/Users/ruhui/Desktop/data science society/auto_stock_clean_data.csv')
+df = pd.read_csv('auto_stock_clean_data.csv')
+
 df['Date'] = pd.to_datetime(df['Date'])
-split_date = '2023-01-01'
+df.columns = df.columns.str.lower()
 
-train_mask = df['Date'] < split_date
-test_mask = df['Date'] >= split_date
+features = ['volatility_20d', 'momentum_20d', 'momentum_60d', 'rsi_14d']
+df[features] = df.groupby('date')[features].rank(pct=True)
+df[features] = df[features].fillna(0.5)
 
-train_df = df[train_mask]
-test_df = df[test_mask]
-
-feature_cols = ['momentum_20d', 'momentum_60d', 'volatility_20d', 'rsi_14d']
+feature_cols = features
 target_col = 'target_rank'
+split_date = pd.to_datetime('2023-01-01')
+train_mask = df['date'] < split_date
+test_mask = df['date'] >= split_date
+
+train_df = df[train_mask].copy()
+test_df = df[test_mask].copy()
 
 X_train = train_df[feature_cols]
 y_train = train_df[target_col]
@@ -20,34 +25,29 @@ y_train = train_df[target_col]
 X_test = test_df[feature_cols]
 y_test = test_df[target_col]
 
-print(f"Training set features shape: {X_train.shape}, Target shape: {y_train.shape}")
-print(f"Test set features shape: {X_test.shape}, Target shape: {y_test.shape}")
-
 rf_model = RandomForestRegressor(
-    n_estimators=100,  
-    max_depth=5,       
-    random_state=16   
+    n_estimators=200, 
+    max_depth=2,         
+    min_samples_leaf=3,  
+    random_state=42
 )
 rf_model.fit(X_train, y_train)
-y_pred = rf_model.predict(X_test)
+test_df['predicted_rank'] = rf_model.predict(X_test)
+test_df['signal'] = -test_df['predicted_rank']
 
-test_df = test_df.copy()
-test_df['Predicted_Rank'] = y_pred
-
-print("\nModel prediction completed! Here are the predicted ranks for the first 5 days:")
-print(test_df[['Date', 'Ticker', 'target_rank', 'Predicted_Rank']].head())
-
-
-import scipy.stats as stats
-
-print("\n" + "="*40)
-print("Core Quant Metrics")
-print("="*40)
+print("\n" + "=" * 40)
+print("Core Quant Metrics (Optimized Reversal Baseline)")
+print("=" * 40)
 
 print("\n[Feature Contributions]")
 importances = rf_model.feature_importances_
 for feature, imp in zip(feature_cols, importances):
     print(f"- {feature}: {imp:.1%}")
 
-ic_value = test_df['target_rank'].corr(test_df['Predicted_Rank'], method='spearman')
-print(f"\n[Overall Model Rank IC]: {ic_value:.4f}")
+overall_ic = test_df[target_col].corr(test_df['signal'], method='spearman')
+print(f"\n[Overall Rank IC (Reversal Signal)]: {overall_ic:.4f}")
+
+daily_ic = test_df.groupby('date').apply(
+    lambda g: g[target_col].corr(g['signal'], method='spearman')
+)
+print(f"[Daily Mean Rank IC]: {daily_ic.mean():.4f}, Std: {daily_ic.std():.4f}")
