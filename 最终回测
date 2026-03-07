@@ -1,0 +1,64 @@
+if metrics is not None:
+    # 8. 打印结果
+    print("\n" + "="*50)
+    print("📈 回测结果")
+    print("="*50)
+
+    print(f"\n策略表现:")
+    print(f"  年化收益率: {metrics['strategy']['annual_return']:.2%}")
+    print(f"  年化波动率: {metrics['strategy']['annual_vol']:.2%}")
+    print(f"  夏普比率: {metrics['strategy']['sharpe']:.2f}")
+    print(f"  最大回撤: {metrics['strategy']['max_drawdown']:.2%}")
+
+    print(f"\n基准表现 (XLY):")
+    print(f"  年化收益率: {metrics['benchmark']['annual_return']:.2%}")
+    print(f"  年化波动率: {metrics['benchmark']['annual_vol']:.2%}")
+    print(f"  夏普比率: {metrics['benchmark']['sharpe']:.2f}")
+    print(f"  最大回撤: {metrics['benchmark']['max_drawdown']:.2%}")
+
+    print(f"\n信息比率: {metrics['info_ratio']:.2f}")
+
+    # 9. 可视化
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+
+    # 图1: 累计收益对比
+    ax1 = axes[0]
+    metrics['strategy']['cumulative'].plot(ax=ax1, label='Strategy', linewidth=2, color='blue', marker='o')
+    metrics['benchmark']['cumulative'].plot(ax=ax1, label='XLY Benchmark', linewidth=2, color='red', marker='s')
+    ax1.set_title('Cumulative Returns: Strategy vs XLY (2023)', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Cumulative Return')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
+
+    # 图2: 月度收益对比
+    ax2 = axes[1]
+    x = range(len(strategy_returns))  # 🔥 修复：用 strategy_returns
+    width = 0.35
+    ax2.bar([i - width/2 for i in x], strategy_returns.values, width, label='Strategy', alpha=0.8, color='blue')
+    ax2.bar([i + width/2 for i in x], xly_returns.values, width, label='XLY', alpha=0.8, color='red')
+    ax2.set_title('Monthly Returns Comparison (2023)', fontsize=14, fontweight='bold')
+    ax2.set_ylabel('Return')
+    ax2.set_xlabel('Month')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(strategy_returns.index, rotation=45)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig('backtest_results.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+    # 10. 输出月度收益表
+    print("\n📊 月度收益明细:")
+    monthly_table = pd.DataFrame({
+        'Strategy': strategy_returns,  # 🔥 修复
+        'XLY': xly_returns,            # 🔥 修复
+        'Excess': strategy_returns - xly_returns
+    })
+    print(monthly_table.round(4) * 100)
+
+    # 11. 保存结果
+    monthly_table.to_csv('backtest_monthly_returns.csv')
+    print("\n✅ 回测完成！结果已保存")
