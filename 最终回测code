@@ -1,0 +1,296 @@
+# ============================================
+# 最终完整版回测代码 - Auto Stock Ranking Strategy
+# ============================================
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+print("🚗 开始回测...")
+
+# 1. 加载数据
+df = pd.read_csv('auto_stock_clean_data.csv')
+df['Date'] = pd.to_datetime(df['Date'])
+print(f"数据加载完成，共 {len(df)} 条记录")
+
+# 2. 获取股票价格数据
+tickers = ['TSLA', 'F', 'GM', 'TM', 'HMC', 'STLA', 'NIO', 'LI', 'BYDDY']
+print("下载价格数据...")
+
+prices = yf.download(tickers, start='2023-01-01', end='2023-12-31', auto_adjust=False)
+
+# 提取Adj Close
+adj_close = pd.DataFrame()
+for ticker in tickers:
+    try:
+        if ('Adj Close', ticker) in prices.columns:
+            adj_close[ticker] = prices[('Adj Close', ticker)]
+        else:
+            adj_close[ticker] = prices[('Close', ticker)]
+    except:
+        print(f"⚠️ 无法获取 {ticker} 的数据")
+
+print(f"价格数据形状: {adj_close.shape}")
+
+# 3. 准备每月预测数据
+df['month'] = pd.to_datetime(df['Date']).dt.to_period('M')
+
+if 'predicted_rank' not in df.columns:
+    print("使用动量排名作为预测")
+    df['predicted_rank'] = df.groupby('Date')['momentum_60d'].rank(pct=True)
+
+# 4. 回测核心逻辑
+def run_backtest(df, prices_df, top_pct=0.2):
+    """
+    回测策略：每月做多Top 20%，做空Bottom 20%
+    """
+    portfolio_returns = []
+    months = []
+    
+    # 获取所有月份
+    unique_months = sorted(df['month'].unique())
+    print(f"\n总共有 {len(unique_months)} 个月份数据")
+    
+    for i, month in enumerate(unique_months[:-1]):
+        
+        # 只从2023年开始
+        if month.year < 2023:
+            continue
+            
+        # 当前月的预测
+        month_data = df[df['month'] == month].copy()
+        
+        if len(month_data) == 0:
+            continue
+        
+        # 计算signal = -predicted_rank
+        month_data['signal'] = -month_data['predicted_rank']
+        month_data = month_data.sort_values('signal', ascending=False)
+        
+        n_stocks = len(month_data)
+        n_long = max(1, int(n_stocks * top_pct))
+        
+        long_stocks = month_data.head(n_long)['Ticker'].values
+        short_stocks = month_data.tail(n_long)['Ticker'].values
+        
+        # 下个月
+        next_month = unique_months[i+1]
+        
+        if next_month.year < 2023:
+            continue
+            
+        next_month_start = pd.Timestamp(next_month.start_time)
+        next_month_end = pd.Timestamp(next_month.end_time)
+        
+        # 找到交易日
+        available_dates = prices_df.index
+        start_date = min(available_dates[available_dates >= next_month_start]) if any(available_dates >= next_month_start) else None
+        end_date = min(available_dates[available_dates <= next_month_end]) if any(available_dates <= next_month_end) else None
+        
+        if start_date is not None and end_date is not None and start_date in prices_df.index and end_date in prices_df.index:
+            # 做多组合收益
+            long_returns = []
+            for stock in long_stocks:
+                if stock in prices_df.columns:
+                    start_price = prices_df.loc[start_date, stock]
+                    end_price = prices_df.loc[end_date, stock]
+                    if pd.notna(start_price) and pd.notna(end_price) and start_price > 0:
+                        ret = (end_price / start_price) - 1
+                        long_returns.append(ret)
+            
+            # 做空组合收益
+            short_returns = []
+            for stock in short_stocks:
+                if stock in prices_df.columns:
+                    start_price = prices_df.loc[start_date, stock]
+                    end_price = prices_df.loc[end_date, stock]
+                    if pd.notna(start_price) and pd.notna(end_price) and start_price > 0:
+                        ret = (end_price / start_price) - 1
+                        short_returns.append(-ret)
+            
+            # 策略收益
+            if long_returns and short_returns:
+                strategy_return = np.mean(long_returns) + np.mean(short_returns)
+                portfolio_returns.append(strategy_return)
+                months.append(next_month)
+                print(f"  {month} -> {next_month}: 收益 = {strategy_return:.2%}")
+    
+    return pd.Series(portfolio_returns, index=months, name='Strategy')
+
+# 5. 运行回测
+print("\n📊 运行回测策略...")
+strategy_returns = run_backtest(df, adj_close)
+
+# 6. 获取基准收益
+print("\n下载基准数据 XLY...")
+xly = yf.download('XLY', start='2023-01-01', end='2023-12-31', auto_adjust=False)
+
+# 获取XLY价格
+if ('Adj Close', 'XLY') in xly.columns:
+    xly_prices = xly[('Adj Close', 'XLY')]
+elif 'Adj Close' in xly.columns:
+    xly_prices = xly['Adj Close']
+else:
+    xly_prices = xly['Close'] if 'Close' in xly.columns else xly.iloc[:, 0]
+
+# 计算月度收益
+xly_monthly = xly_prices.resample('ME').last().pct_change().dropna()
+
+# 对齐时间
+if len(strategy_returns) > 0:
+    strategy_dates = [d.strftime('%Y-%m') for d in strategy_returns.index]
+    xly_dates = [d.strftime('%Y-%m') for d in xly_monthly.index]
+    
+    common_dates = sorted(set(strategy_dates).intersection(set(xly_dates)))
+    
+    if len(common_dates) > 0:
+        strategy_aligned = []
+        xly_aligned = []
+        
+        for date in common_dates:
+            s_idx = strategy_dates.index(date)
+            x_idx = xly_dates.index(date)
+            strategy_aligned.append(strategy_returns.iloc[s_idx])
+            xly_aligned.append(xly_monthly.iloc[x_idx])
+        
+        strategy_returns = pd.Series(strategy_aligned, index=common_dates)
+        xly_returns = pd.Series(xly_aligned, index=common_dates)
+
+# 7. 计算绩效指标（最终修复版）
+def calculate_metrics(returns, benchmark_returns):
+    """计算绩效指标 - 修复最大回撤计算"""
+    
+    if len(returns) == 0 or len(benchmark_returns) == 0:
+        print("数据不足")
+        return None
+    
+    returns = pd.Series(returns).astype(float)
+    benchmark_returns = pd.Series(benchmark_returns).astype(float)
+    
+    # 累计收益（从1.0开始）
+    cumulative_strategy = (1 + returns).cumprod()
+    cumulative_benchmark = (1 + benchmark_returns).cumprod()
+    
+    # 修复：正确计算最大回撤（加上初始点1.0）
+    def calculate_max_drawdown(cumulative_series):
+        """计算最大回撤 - 修复版"""
+        # 在开头加上初始值1.0
+        all_values = pd.Series([1.0] + cumulative_series.tolist(), 
+                               index=['start'] + cumulative_series.index.tolist())
+        
+        # 计算运行最大值
+        running_max = all_values.expanding().max()
+        # 计算回撤
+        drawdown = (all_values - running_max) / running_max
+        # 返回最大回撤（负值）
+        return drawdown.min()
+    
+    mdd_strategy = calculate_max_drawdown(cumulative_strategy)
+    mdd_benchmark = calculate_max_drawdown(cumulative_benchmark)
+    
+    # 打印中间结果用于验证
+    print(f"\n📊 累计收益路径（含初始点）:")
+    all_values = pd.Series([1.0] + cumulative_strategy.tolist(), 
+                           index=['2023-01 start'] + [f"2023-{i:02d}" for i in range(2, len(cumulative_strategy)+2)])
+    for date, value in all_values.items():
+        print(f"  {date}: {value:.4f}")
+    print(f"  最大回撤计算: {mdd_strategy:.2%}")
+    
+    # 年化收益率
+    annual_return_strategy = (cumulative_strategy.iloc[-1] ** (12/len(returns))) - 1
+    annual_return_benchmark = (cumulative_benchmark.iloc[-1] ** (12/len(benchmark_returns))) - 1
+    
+    # 年化波动率
+    annual_vol_strategy = returns.std() * np.sqrt(12)
+    annual_vol_benchmark = benchmark_returns.std() * np.sqrt(12)
+    
+    # 夏普比率
+    sharpe_strategy = annual_return_strategy / annual_vol_strategy if annual_vol_strategy > 0 else 0
+    sharpe_benchmark = annual_return_benchmark / annual_vol_benchmark if annual_vol_benchmark > 0 else 0
+    
+    # 信息比率
+    excess_returns = returns - benchmark_returns
+    tracking_error = excess_returns.std() * np.sqrt(12)
+    info_ratio = (excess_returns.mean() * 12) / tracking_error if tracking_error > 0 else 0
+    
+    return {
+        'strategy': {
+            'cumulative': cumulative_strategy,
+            'annual_return': annual_return_strategy,
+            'annual_vol': annual_vol_strategy,
+            'sharpe': sharpe_strategy,
+            'max_drawdown': mdd_strategy
+        },
+        'benchmark': {
+            'cumulative': cumulative_benchmark,
+            'annual_return': annual_return_benchmark,
+            'annual_vol': annual_vol_benchmark,
+            'sharpe': sharpe_benchmark,
+            'max_drawdown': mdd_benchmark
+        },
+        'info_ratio': info_ratio
+    }
+
+metrics = calculate_metrics(strategy_returns, xly_returns)
+
+if metrics is not None:
+    print("\n" + "="*50)
+    print("📈 回测结果")
+    print("="*50)
+
+    print(f"\n策略表现:")
+    print(f"  年化收益率: {metrics['strategy']['annual_return']:.2%}")
+    print(f"  年化波动率: {metrics['strategy']['annual_vol']:.2%}")
+    print(f"  夏普比率: {metrics['strategy']['sharpe']:.2f}")
+    print(f"  最大回撤: {metrics['strategy']['max_drawdown']:.2%}")
+
+    print(f"\n基准表现 (XLY):")
+    print(f"  年化收益率: {metrics['benchmark']['annual_return']:.2%}")
+    print(f"  年化波动率: {metrics['benchmark']['annual_vol']:.2%}")
+    print(f"  夏普比率: {metrics['benchmark']['sharpe']:.2f}")
+    print(f"  最大回撤: {metrics['benchmark']['max_drawdown']:.2%}")
+
+    print(f"\n信息比率: {metrics['info_ratio']:.2f}")
+
+    # 可视化
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+
+    ax1 = axes[0]
+    metrics['strategy']['cumulative'].plot(ax=ax1, label='Strategy', linewidth=2, color='blue', marker='o')
+    metrics['benchmark']['cumulative'].plot(ax=ax1, label='XLY Benchmark', linewidth=2, color='red', marker='s')
+    ax1.set_title('Cumulative Returns: Strategy vs XLY (2023)', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Cumulative Return')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
+
+    ax2 = axes[1]
+    x = range(len(strategy_returns))
+    width = 0.35
+    ax2.bar([i - width/2 for i in x], strategy_returns.values * 100, width, label='Strategy', alpha=0.8, color='blue')
+    ax2.bar([i + width/2 for i in x], xly_returns.values * 100, width, label='XLY', alpha=0.8, color='red')
+    ax2.set_title('Monthly Returns Comparison (2023)', fontsize=14, fontweight='bold')
+    ax2.set_ylabel('Return (%)')
+    ax2.set_xlabel('Month')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(strategy_returns.index, rotation=45)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig('backtest_results.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+    print("\n📊 月度收益明细 (%):")
+    monthly_table = pd.DataFrame({
+        'Strategy': strategy_returns * 100,
+        'XLY': xly_returns * 100,
+        'Excess': (strategy_returns - xly_returns) * 100
+    })
+    print(monthly_table.round(2))
+
+    monthly_table.to_csv('backtest_monthly_returns.csv')
+    print("\n✅ 回测完成！结果已保存")
